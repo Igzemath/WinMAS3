@@ -302,43 +302,68 @@ def check_windows_activation() -> dict:
         info["etat_licence"] = f"Erreur : {e}"
     return info
 
-
 def run_activation(method_key: str, callback) -> None:
+    """Lance l'activation MAS en mode automatique (sans interaction utilisateur)."""
     method = ACTIVATION_METHODS[method_key]
-    ps_inner = 'irm https://get.activated.win | iex'
+    flag = method["cmd_flag"]
+
+    # Commande MAS avec paramètre automatique
+    # /S = Silent mode (pas d'interaction)
+    # Le flag spécifie la méthode (/HWID, /Ohook, /KMS38, /KMS-ActAndRenewalTask)
+    ps_inner = f"& ([ScriptBlock]::Create((irm https://get.activated.win))) {flag} /S"
+
+    # Échapper pour l'imbrication PowerShell
+    ps_inner_escaped = ps_inner.replace('"', '\\"')
+
+    # Commande complète : lancer PowerShell en admin, attendre la fin
     cmd = [
         "powershell", "-NoProfile", "-Command",
         (
-            f"Start-Process powershell -Verb RunAs -Wait "
-            f"-ArgumentList '-NoProfile','-Command','{ps_inner}'"
+            f'Start-Process powershell -Verb RunAs -Wait '
+            f'-ArgumentList \'-NoProfile\',\'-Command\','
+            f'\"{ps_inner_escaped}\"'
         )
     ]
-    callback("activation_status", ("Lancement de l'activation…", COL["status_warn"]))
+
+    callback("activation_status", (
+        f"Lancement de l'activation ({method['label']})…",
+        COL["status_warn"]
+    ))
+
     try:
         process = subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=300, creationflags=0x08000000
         )
+
         if process.returncode == 0:
             callback("activation_status", (
-                "Script lancé — vérifiez la fenêtre PowerShell admin",
+                "Activation terminée — revérification en cours…",
                 COL["status_info"]
             ))
         else:
             stderr = process.stderr.strip() if process.stderr else ""
-            if "canceled" in stderr.lower() or "annul" in stderr.lower():
+            stdout = process.stdout.strip() if process.stdout else ""
+
+            if any(kw in (stderr + stdout).lower() for kw in [
+                "canceled", "annul", "refused", "is not recognized"
+            ]):
                 callback("activation_status", (
-                    "Élévation refusée par l'utilisateur", COL["status_warn"]
+                    "Élévation admin refusée par l'utilisateur",
+                    COL["status_warn"]
                 ))
             else:
                 callback("activation_status", (
-                    f"Erreur PowerShell (code {process.returncode})", COL["status_err"]
+                    f"Le script a retourné le code {process.returncode}",
+                    COL["status_err"]
                 ))
     except subprocess.TimeoutExpired:
-        callback("activation_status", ("Timeout — le script prend trop de temps", COL["status_warn"]))
+        callback("activation_status", (
+            "Timeout — le script prend trop de temps (> 5 min)",
+            COL["status_warn"]
+        ))
     except Exception as e:
         callback("activation_status", (f"Erreur : {e}", COL["status_err"]))
-
 
 # ──────────────────────────────────────────────
 # Scraping ISOs
@@ -1158,10 +1183,30 @@ class App(ctk.CTk):
 
     def _t_activate(self, method_key):
         run_activation(method_key, self._activation_callback)
+
+        # Attendre un peu que l'activation prenne effet
         import time
-        time.sleep(3)
+        time.sleep(5)
+
+        # Revérifier automatiquement
+        self._activation_callback(
+            "activation_status",
+            ("Revérification de l'activation…", COL["status_info"])
+        )
         info = check_windows_activation()
         self.after(0, self._u_act, info)
+
+        if info["active"]:
+            self._activation_callback(
+                "activation_status",
+                ("Activation réussie !", COL["status_ok"])
+            )
+        else:
+            self._activation_callback(
+                "activation_status",
+                ("L'activation ne semble pas avoir fonctionné", COL["status_err"])
+            )
+
         self.after(0, self._finish_activation)
 
     def _activation_callback(self, event_type, data):
